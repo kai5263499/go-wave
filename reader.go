@@ -21,8 +21,10 @@ type Reader struct {
 	size int64
 
 	RiffChunk *RiffChunk
-	FmtChunk  *FmtChunk
-	DataChunk *DataReaderChunk
+
+	fmtBaseOffset int64
+	FmtChunk      *FmtChunk
+	DataChunk     *DataReaderChunk
 
 	originOfAudioData int64
 	NumSamples        uint32
@@ -62,6 +64,10 @@ func NewReader(fileName string) (*Reader, error) {
 	if err := reader.parseRiffChunk(); err != nil {
 		panic(err)
 	}
+	if reader.fmtBaseOffset, err = reader.findFmtOffset(); err != nil {
+		panic(err)
+	}
+	reader.extChunkSize += reader.fmtBaseOffset - riffChunkSize
 	if err := reader.parseFmtChunk(); err != nil {
 		panic(err)
 	}
@@ -125,8 +131,48 @@ func (rd *Reader) parseRiffChunk() error {
 	return nil
 }
 
+func (rd *Reader) findFmtOffset() (int64, error) {
+	var curOffset int64
+	curOffset = riffChunkSize
+
+	chunkID := make([]byte, 4)
+	chunkSize := &csize{}
+	var err error
+
+	limit := 10
+	for {
+		rd.input.Seek(curOffset, os.SEEK_SET)
+		err = binary.Read(rd.input, binary.BigEndian, chunkID)
+		if err == io.EOF {
+			return 0, fmt.Errorf("unexpected file end")
+		} else if err != nil {
+			return 0, err
+		}
+
+		if string(chunkID[:]) == fmtChunkToken {
+			rd.input.Seek(curOffset, os.SEEK_SET)
+			return curOffset, nil
+		}
+
+		rd.input.Seek(curOffset+4, os.SEEK_SET)
+		err = binary.Read(rd.input, binary.LittleEndian, chunkSize)
+		if err == io.EOF {
+			return 0, fmt.Errorf("unexpected file end")
+		} else if err != nil {
+			return 0, err
+		}
+
+		curOffset += int64(chunkSize.ChunkSize) + 8
+		limit--
+		if limit <= 0 {
+			break
+		}
+	}
+	return 0, fmt.Errorf("fmt chunk not found")
+}
+
 func (rd *Reader) parseFmtChunk() error {
-	rd.input.Seek(riffChunkSize, os.SEEK_SET)
+	rd.input.Seek(rd.fmtBaseOffset, os.SEEK_SET)
 
 	// 'fmt ' と書かれているかどうか
 	chunkId := make([]byte, 4)
@@ -193,7 +239,7 @@ func (rd *Reader) parseListChunk() error {
 
 	// 可変な header 長管理変数更新
 	// rd.extChunkSize += int64(chunkSize[0]) + 4 + 4
-	rd.extChunkSize = int64(chunkSize[0]) + 4 + 4
+	rd.extChunkSize += int64(chunkSize[0]) + 4 + 4
 
 	return nil
 }
